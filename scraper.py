@@ -163,7 +163,6 @@ def take_screenshot(url, name):
 
 def handle_age_verification(driver):
     try:
-        wait = WebDriverWait(driver, 3)
         selectors = [
             ".age-verification button.btn-success",
             ".btn-success",
@@ -196,9 +195,68 @@ def handle_age_verification(driver):
 
     return False
 
+def scrape_listing_page(listing_url):
+    try:
+        response = requests.get(listing_url, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, 'html.parser')
+        detail_links = soup.find_all('a', class_='list_item_title')
+        return [link['href'] for link in detail_links if link.get('href')], soup
+    except Exception as e:
+        logging.error(f"Failed to scrape listing page {listing_url}: {e}")
+        return [], None
+
+def get_next_page_url(soup):
+    try:
+        paginator = soup.find('div', id='paginator')
+        if paginator:
+            next_page = paginator.find('a', string='next >')
+            if next_page and next_page.get('href'):
+                next_url = next_page['href']
+                if not next_url.startswith('http'):
+                    next_url = 'https://www.adsafrica.co.za' + next_url
+                return next_url
+    except Exception as e:
+        logging.error(f"Error finding next page URL: {e}")
+    return None
+
+def scrape_detail_page(url):
+    try:
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        title = soup.find('h1', class_='item_title').get_text(strip=True) if soup.find('h1', class_='item_title') else 'N/A'
+        date = soup.find('span', id='item_date').get_text(strip=True) if soup.find('span', id='item_date') else 'N/A'
+        city = soup.find('div', id='city_name').find('span', class_='params_field_value').get_text(strip=True) if soup.find('div', id='city_name') else 'N/A'
+        main_image = soup.find('img', id='mainPic')['src'] if soup.find('img', id='mainPic') else 'N/A'
+        thumb_images = '; '.join([img['src'] for img in soup.find('div', id='thumbs').find_all('img')]) if soup.find('div', id='thumbs') else 'N/A'
+        contact_info = soup.find_all('span', id='contact_field_value')
+        name = contact_info[0].get_text(strip=True) if len(contact_info) > 0 else 'N/A'
+        phone = contact_info[1].get_text(strip=True) if len(contact_info) > 1 else 'N/A'
+        description = soup.find('div', id='item_text_value').get_text(strip=True) if soup.find('div', id='item_text_value') else 'N/A'
+
+        screenshot_url = take_screenshot(url, name)
+
+        return {
+            'url': url,
+            'title': title,
+            'date': date,
+            'city': city,
+            'main_image': main_image,
+            'thumbnail_images': thumb_images,
+            'name': name,
+            'phone': phone,
+            'description': description,
+            'screenshot_url': screenshot_url if screenshot_url else 'N/A'
+        }
+    except Exception as e:
+        logging.error(f"Error scraping detail page {url}: {e}")
+        return None
+
 def insert_to_supabase(data_batch):
     if not data_batch:
-        logging.info("No new data to insert to Supabase.")
+        logging.info("No data to insert to Supabase.")
         return
 
     try:
@@ -209,7 +267,7 @@ def insert_to_supabase(data_batch):
                 elif isinstance(value, dict):
                     item[key] = json.dumps(value)
 
-        result = supabase.table(TABLE_NAME).insert(data_batch, returning='minimal').execute()
+        supabase.table(TABLE_NAME).insert(data_batch, returning='minimal').execute()
         logging.info(f"Inserted {len(data_batch)} records into Supabase.")
     except Exception as e:
         logging.error(f"Error inserting to Supabase: {e}")
@@ -245,26 +303,31 @@ def main():
     start_time = time.time()
     logging.info("=== AdsAfrica Scraper Started ===")
     batch_data = []
-    total_inserted = 0
+    page_url = BASE_URL
+    page_count = 0
 
-    # Simulate scraping and insertion
-    # For demo purpose, add dummy data (replace with your actual scraping process)
-    dummy_data = [{'url': 'example.com', 'title': 'Sample', 'date': 'Today', 'city': 'SampleCity',
-                   'main_image': 'img.png', 'thumbnail_images': 'img_thumb.png',
-                   'name': 'SampleName', 'phone': '123456789', 'description': 'Sample Description',
-                   'screenshot_url': 'N/A'}]
+    while page_url and page_count < MAX_PAGES:
+        page_count += 1
+        logging.info(f"Scraping page {page_count}: {page_url}")
+        urls, soup = scrape_listing_page(page_url)
+        if not urls or not soup:
+            break
 
-    batch_data.extend(dummy_data)
-    total_inserted += len(dummy_data)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = [executor.submit(scrape_detail_page, url) for url in urls]
+            for future in concurrent.futures.as_completed(futures):
+                result = future.result()
+                if result:
+                    batch_data.append(result)
 
-    # Insert data
-    if batch_data:
-        insert_to_supabase(batch_data)
+        process_screenshot_queue()
 
-    # Process any remaining screenshots
-    process_screenshot_queue()
+        if batch_data:
+            insert_to_supabase(batch_data)
+            batch_data.clear()
 
-    # Count rows in Supabase
+        page_url = get_next_page_url(soup)
+
     total_rows = count_supabase_rows()
     if total_rows is not None:
         print(f"✅ Total rows in Supabase table '{TABLE_NAME}': {total_rows}")
@@ -272,8 +335,6 @@ def main():
 
     elapsed_time = time.time() - start_time
     logging.info(f"✅ Scraping completed in {elapsed_time:.2f} seconds")
-    logging.info(f"✅ Total inserted this run: {total_inserted}")
-
     cleanup_resources()
 
 if __name__ == "__main__":
