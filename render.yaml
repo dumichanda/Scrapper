@@ -5,7 +5,7 @@ services:
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: python scraper.py
-    plan: free
+    plan: starter
     schedule: "0 16 * * *"  # Run daily at 16:00 UTC
     envVars:
       - key: PYTHON_VERSION
