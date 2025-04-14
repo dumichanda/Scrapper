@@ -59,6 +59,13 @@ jobs:
           name: scraper-log
           path: scraper.log
 
-      # Step 7: Optional Email Notification (uses GitHub default)
-      # GitHub automatically sends email notifications if workflows fail,
-      # and for success notifications if user settings allow.
+      # ✅ Step 7: Upload summary.txt as artifact (NEW)
+      - name: Upload summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: summary
+          path: summary.txt
+
+      # Step 8: Optional Email Notification (GitHub built-in)
+      # No changes needed, GitHub sends email notifications automatically for failed runs.
