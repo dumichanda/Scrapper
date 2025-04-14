@@ -25,6 +25,10 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
+    - name: Fix supabase initialization for GitHub Actions
+      run: |
+        # Create a patched version of the scraper.py file
+        sed -i 's/supabase = create_client(SUPABASE_URL, SUPABASE_KEY)/try:\n    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)\nexcept TypeError:\n    supabase = create_client(SUPABASE_URL, SUPABASE_KEY, options={})/g' scraper.py
     - name: Run scraper
       env:
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -34,5 +38,9 @@ jobs:
         BASE_URL: https://www.adsafrica.co.za/category/65
         MAX_PAGES: 150
         MAX_WORKERS: 5
+        # Disable any proxy settings
+        HTTP_PROXY: ""
+        HTTPS_PROXY: ""
+        NO_PROXY: "*"
       run: |
         python scraper.py
