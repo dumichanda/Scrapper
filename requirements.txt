@@ -6,4 +6,5 @@ supabase==2.2.0
 Pillow==10.1.0
 python-dotenv==1.0.0
 concurrent-log-handler==0.9.24
+flask==2.3.3
 gunicorn==21.2.0
