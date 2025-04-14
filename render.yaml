@@ -1,34 +1,38 @@
-services:
-  # Cron job to run the scraper once daily at 16:00 UTC
-  - type: cron
-    name: ads-africa-scraper
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python scraper.py
-    plan: starter
-    schedule: "0 16 * * *"  # Run daily at 16:00 UTC
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.9.0
-      - key: SUPABASE_URL
-        sync: false  # User must set this in Render dashboard
-      - key: SUPABASE_KEY
-        sync: false  # User must set this in Render dashboard
-      - key: BUCKET_NAME
-        value: screenshots
-      - key: TABLE_NAME
-        value: listings
-      - key: BASE_URL
-        value: https://www.adsafrica.co.za/category/65
-      - key: BATCH_SIZE
-        value: 10
-      - key: MAX_PAGES
-        value: 150
-      - key: MAX_WORKERS
-        value: 5
-      - key: SCREENSHOT_WAIT_TIME
-        value: 3
-      - key: MAX_RETRIES
-        value: 3
-      - key: TEMP_DIR
-        value: /tmp
+name: Run Scraper
+
+on:
+  push:
+    branches: [ main ]
+  schedule:
+    - cron: '0 16 * * *'  # Run daily at 16:00 UTC
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    - name: Install Chrome
+      run: |
+        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+        echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+        sudo apt-get update
+        sudo apt-get -y install google-chrome-stable
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    - name: Run scraper
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        BUCKET_NAME: screenshots
+        TABLE_NAME: listings
+        BASE_URL: https://www.adsafrica.co.za/category/65
+        MAX_PAGES: 150
+        MAX_WORKERS: 5
+      run: |
+        python scraper.py
