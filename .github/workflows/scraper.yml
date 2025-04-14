@@ -45,9 +45,7 @@ jobs:
           BASE_URL: https://www.adsafrica.co.za/category/65
           MAX_PAGES: 150
           MAX_WORKERS: 5
-          HTTP_PROXY: ""
-          HTTPS_PROXY: ""
-          NO_PROXY: "*"
+          
         run: |
           python scraper.py || true  # Avoid premature failure to capture logs
 
