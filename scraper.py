@@ -52,6 +52,7 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 screenshot_queue = Queue()
 screenshot_urls = {}
 screenshot_lock = threading.Lock()
+pending_records = {}  # NEW: Keep track of records with pending screenshots
 
 def get_webdriver():
     chrome_options = Options()
@@ -124,6 +125,26 @@ def take_screenshot(url, name):
         except:
             pass
 
+def update_records_with_screenshots():
+    """Update database records with resolved screenshot URLs"""
+    to_update = []
+    with screenshot_lock:
+        for url, info in screenshot_urls.items():
+            if info.get("resolved") and url in pending_records:
+                record_id = pending_records[url]
+                to_update.append({"id": record_id, "screenshot_url": info["url"]})
+                del pending_records[url]
+    
+    if to_update:
+        try:
+            # Update records in batches
+            for i in range(0, len(to_update), BATCH_SIZE):
+                batch = to_update[i:i+BATCH_SIZE]
+                supabase.table(TABLE_NAME).upsert(batch).execute()
+                logging.info(f"Updated {len(batch)} records with screenshot URLs")
+        except Exception as e:
+            logging.error(f"Failed to update screenshots in database: {e}")
+
 def process_screenshot_queue():
     if screenshot_queue.empty():
         return
@@ -156,6 +177,9 @@ def process_screenshot_queue():
                 os.remove(path)
         except Exception as e:
             logging.error(f"Cleanup failed: {e}")
+    
+    # Update any resolved screenshots in the database
+    update_records_with_screenshots()
 
 def scrape_listing_page(listing_url):
     try:
@@ -210,13 +234,26 @@ def scrape_detail_page(url):
 
 def insert_to_supabase(data_batch):
     try:
+        # Format data for insertion
         for item in data_batch:
             for k, v in item.items():
                 if v is None:
                     item[k] = 'N/A'
                 elif isinstance(v, dict):
                     item[k] = json.dumps(v)
-        supabase.table(TABLE_NAME).insert(data_batch, returning='minimal').execute()
+            
+            # If this record has a pending screenshot, track it for later updating
+            if isinstance(item.get('screenshot_url'), dict) and item['screenshot_url'].get('pending'):
+                pending_records[item['url']] = None  # Will store ID after insertion
+        
+        # Insert records
+        result = supabase.table(TABLE_NAME).insert(data_batch).execute()
+        
+        # Save record IDs for pending screenshots
+        for i, record in enumerate(result.data):
+            if i < len(data_batch) and data_batch[i]['url'] in pending_records:
+                pending_records[data_batch[i]['url']] = record['id']
+        
         logging.info(f"Inserted {len(data_batch)} records.")
     except Exception as e:
         logging.error(f"Insertion error: {e}")
@@ -248,6 +285,7 @@ def main():
 
     while page_url and page_count < MAX_PAGES:
         page_count += 1
+        logging.info(f"Processing page {page_count}: {page_url}")
         urls, soup = scrape_listing_page(page_url)
         if not urls or not soup:
             break
@@ -259,10 +297,27 @@ def main():
                 if data:
                     batch_data.append(data)
 
+        # Process screenshot queue and update database
         process_screenshot_queue()
-        insert_to_supabase(batch_data)
-        batch_data.clear()
+        
+        # Insert data into database
+        if batch_data:
+            insert_to_supabase(batch_data)
+            batch_data.clear()
+        
+        # Process screenshot queue again to catch any remaining screenshots
+        process_screenshot_queue()
+        
+        # Get next page URL
         page_url = get_next_page_url(soup)
+    
+    # Final processing of any remaining screenshots
+    process_screenshot_queue()
+    
+    # Check for any pending screenshots and update them
+    if pending_records:
+        logging.info(f"Final update for {len(pending_records)} pending screenshots")
+        update_records_with_screenshots()
 
     total_rows = count_supabase_rows()
     if total_rows:
