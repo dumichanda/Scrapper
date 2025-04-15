@@ -105,7 +105,9 @@ def process_screenshot_queue():
             with open(path, "rb") as f:
                 content = f.read()
                 supabase.storage.from_(BUCKET_NAME).upload(
-                    path=filename, file=content, file_options={"contentType": "image/png"}
+                    path=filename, 
+                    file=content, 
+                    file_options={"contentType": "image/png"}
                 )
             public_url = supabase.storage.from_(BUCKET_NAME).get_public_url(filename)
             with screenshot_lock:
