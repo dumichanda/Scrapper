@@ -12,7 +12,6 @@ from selenium.webdriver.support import expected_conditions as EC
 from io import BytesIO
 from PIL import Image
 import uuid
-import re
 import threading
 import json
 import concurrent.futures
@@ -22,14 +21,11 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Logging configuration
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("scraper.log")
-    ]
+    handlers=[logging.StreamHandler(), logging.FileHandler("scraper.log")]
 )
 
 # Supabase config
@@ -38,49 +34,38 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 BUCKET_NAME = os.getenv("BUCKET_NAME", "screenshots")
 TABLE_NAME = os.getenv("TABLE_NAME", "listings")
 
-# Performance config
+# Scraper performance config
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "5"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
 MAX_PAGES = int(os.getenv("MAX_PAGES", "150"))
 SCREENSHOT_WAIT_TIME = int(os.getenv("SCREENSHOT_WAIT_TIME", "3"))
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 BASE_URL = os.getenv("BASE_URL", "https://www.adsafrica.co.za/category/65")
 TEMP_DIR = os.getenv("TEMP_DIR", "/tmp")
 
+# Ensure temp directory exists
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# Supabase client
-try:
-    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-    logging.info("Supabase client initialized")
-except Exception as e:
-    logging.error(f"Failed to initialize Supabase client: {e}")
-    raise
+# Initialize Supabase
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-local_storage = threading.local()
+# Screenshot queue
 screenshot_queue = Queue()
 screenshot_urls = {}
 screenshot_lock = threading.Lock()
 
 def get_webdriver():
-    """Initialize WebDriver per thread"""
-    if not hasattr(local_storage, 'driver') or not local_storage.driver:
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--window-size=1920,1080")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--single-process")
-        try:
-            local_storage.driver = webdriver.Chrome(options=chrome_options)
-        except Exception as e:
-            logging.error(f"WebDriver init failed: {e}")
-            local_storage.driver = None
-    return local_storage.driver
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--window-size=1920,1080")
+    try:
+        return webdriver.Chrome(options=chrome_options)
+    except Exception as e:
+        logging.error(f"WebDriver creation failed: {e}")
+        return None
 
 def handle_age_verification(driver):
-    """Bypass age prompts if present"""
     try:
         selectors = [
             ".age-verification button.btn-success",
@@ -112,38 +97,34 @@ def handle_age_verification(driver):
     return False
 
 def take_screenshot(url, name):
-    """Capture and queue screenshot"""
-    for attempt in range(2):
-        driver = get_webdriver()
-        if not driver:
-            return None
+    driver = get_webdriver()
+    if not driver:
+        return None
+    try:
+        driver.get(url)
+        time.sleep(SCREENSHOT_WAIT_TIME)
+        handle_age_verification(driver)
+        time.sleep(1)
+        safe_name = ''.join(c if c.isalnum() else '_' for c in name)[:20] if name != 'N/A' else 'unnamed'
+        filename = f"img_{uuid.uuid4().hex[:8]}.png"
+        screenshot = driver.get_screenshot_as_png()
+        img = Image.open(BytesIO(screenshot))
+        temp_path = os.path.join(TEMP_DIR, filename)
+        img.save(temp_path, format="PNG", quality=95)
+        screenshot_queue.put((filename, temp_path, url))
+        with screenshot_lock:
+            screenshot_urls[url] = {"filename": filename, "resolved": False}
+        return {"pending": True, "filename": filename}
+    except Exception as e:
+        logging.error(f"Error taking screenshot for {url}: {e}")
+        return None
+    finally:
         try:
-            driver.get(url)
-            time.sleep(SCREENSHOT_WAIT_TIME)
-            handle_age_verification(driver)
-            time.sleep(1)
-            safe_name = ''.join(c if c.isalnum() else '_' for c in name)[:20] if name != 'N/A' else 'unnamed'
-            filename = f"img_{uuid.uuid4().hex[:8]}.png"
-            screenshot = driver.get_screenshot_as_png()
-            img = Image.open(BytesIO(screenshot))
-            temp_path = os.path.join(TEMP_DIR, filename)
-            img.save(temp_path, format="PNG", quality=95)
-            screenshot_queue.put((filename, temp_path, url))
-            with screenshot_lock:
-                screenshot_urls[url] = {"filename": filename, "resolved": False}
-            return {"pending": True, "filename": filename}
-        except Exception as e:
-            logging.error(f"Error taking screenshot for {url}: {e}")
-            if attempt == 0:
-                try:
-                    driver.quit()
-                    local_storage.driver = None
-                except:
-                    pass
-    return None
+            driver.quit()
+        except:
+            pass
 
 def process_screenshot_queue():
-    """Upload queued screenshots to Supabase"""
     if screenshot_queue.empty():
         return
     batch, file_paths = [], []
@@ -177,7 +158,6 @@ def process_screenshot_queue():
             logging.error(f"Cleanup failed: {e}")
 
 def scrape_listing_page(listing_url):
-    """Get links to detail pages"""
     try:
         response = requests.get(listing_url, timeout=15)
         soup = BeautifulSoup(response.content, 'html.parser')
@@ -188,7 +168,6 @@ def scrape_listing_page(listing_url):
         return [], None
 
 def get_next_page_url(soup):
-    """Get next page URL"""
     try:
         paginator = soup.find('div', id='paginator')
         next_page = paginator.find('a', string='next >') if paginator else None
@@ -200,7 +179,6 @@ def get_next_page_url(soup):
     return None
 
 def scrape_detail_page(url):
-    """Scrape detail page"""
     try:
         response = requests.get(url, timeout=15)
         soup = BeautifulSoup(response.content, 'html.parser')
@@ -231,7 +209,6 @@ def scrape_detail_page(url):
         return None
 
 def insert_to_supabase(data_batch):
-    """Insert batch to Supabase"""
     try:
         for item in data_batch:
             for k, v in item.items():
@@ -245,7 +222,6 @@ def insert_to_supabase(data_batch):
         logging.error(f"Insertion error: {e}")
 
 def count_supabase_rows():
-    """Row count in Supabase"""
     try:
         res = supabase.table(TABLE_NAME).select("id", count="exact").execute()
         count = res.count
@@ -256,20 +232,12 @@ def count_supabase_rows():
         return None
 
 def write_summary(row_count):
-    """Create summary.txt"""
     try:
         with open("summary.txt", "w") as f:
             f.write("Scraping Summary\n")
             f.write(f"Total rows in Supabase table '{TABLE_NAME}': {row_count}\n")
     except Exception as e:
         logging.error(f"Failed writing summary: {e}")
-
-def cleanup_resources():
-    if hasattr(local_storage, 'driver') and local_storage.driver:
-        try:
-            local_storage.driver.quit()
-        except:
-            pass
 
 def main():
     start_time = time.time()
@@ -302,7 +270,6 @@ def main():
         print(f"✅ Total rows in Supabase: {total_rows}")
 
     logging.info(f"✅ Done in {time.time() - start_time:.2f} sec")
-    cleanup_resources()
 
 if __name__ == "__main__":
     main()
