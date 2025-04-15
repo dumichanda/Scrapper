@@ -46,7 +46,25 @@ TEMP_DIR = os.getenv("TEMP_DIR", "/tmp")
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 # Initialize Supabase
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+try:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    
+    # Create screenshots bucket if it doesn't exist
+    try:
+        # List existing buckets
+        buckets = supabase.storage.list_buckets()
+        bucket_exists = any(bucket.name == BUCKET_NAME for bucket in buckets)
+        
+        if not bucket_exists:
+            logging.info(f"Creating bucket {BUCKET_NAME}")
+            supabase.storage.create_bucket(BUCKET_NAME, {'public': True})
+        else:
+            logging.info(f"Bucket {BUCKET_NAME} already exists")
+    except Exception as e:
+        logging.error(f"Error checking/creating bucket: {e}")
+except Exception as e:
+    logging.error(f"Failed to initialize Supabase: {e}")
+    supabase = None  # Set to None so we can check later
 
 # Screenshot queue
 screenshot_queue = Queue()
@@ -60,10 +78,24 @@ def get_webdriver():
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--disable-features=VizDisplayCompositor")
+    chrome_options.add_argument("--disable-extensions")
+    # Add more verbose logging
+    chrome_options.add_argument("--enable-logging")
+    chrome_options.add_argument("--v=1")
+    
     try:
-        return webdriver.Chrome(options=chrome_options)
+        logging.info("Creating Chrome WebDriver")
+        driver = webdriver.Chrome(options=chrome_options)
+        # Set page load timeout
+        driver.set_page_load_timeout(30)
+        return driver
     except Exception as e:
-        logging.error(f"WebDriver creation failed: {e}")
+        logging.error(f"WebDriver creation failed: {str(e)}")
+        # Log detailed error
+        import traceback
+        logging.error(traceback.format_exc())
         return None
 
 def handle_age_verification(driver):
@@ -100,24 +132,61 @@ def handle_age_verification(driver):
 def take_screenshot(url, name):
     driver = get_webdriver()
     if not driver:
+        logging.error("Failed to create WebDriver")
         return None
     try:
+        logging.info(f"Taking screenshot of {url}")
         driver.get(url)
+        
+        # Wait for page to load
+        logging.info(f"Waiting {SCREENSHOT_WAIT_TIME} seconds for page to load")
         time.sleep(SCREENSHOT_WAIT_TIME)
-        handle_age_verification(driver)
-        time.sleep(1)
+        
+        # Handle age verification if needed
+        handled = handle_age_verification(driver)
+        if handled:
+            logging.info("Age verification handled successfully")
+            time.sleep(1)
+        
+        # Generate a safe filename
         safe_name = ''.join(c if c.isalnum() else '_' for c in name)[:20] if name != 'N/A' else 'unnamed'
         filename = f"img_{uuid.uuid4().hex[:8]}.png"
+        
+        # Take the screenshot
+        logging.info(f"Capturing screenshot as {filename}")
         screenshot = driver.get_screenshot_as_png()
+        
+        if not screenshot:
+            logging.error("Screenshot capture returned empty data")
+            return None
+            
+        # Process the image
         img = Image.open(BytesIO(screenshot))
         temp_path = os.path.join(TEMP_DIR, filename)
+        
+        # Save the screenshot to a temporary file
         img.save(temp_path, format="PNG", quality=95)
+        
+        # Verify the file was saved
+        if not os.path.exists(temp_path):
+            logging.error(f"Failed to save screenshot to {temp_path}")
+            return None
+            
+        file_size = os.path.getsize(temp_path)
+        logging.info(f"Screenshot saved to {temp_path} ({file_size} bytes)")
+        
+        # Add to the screenshot queue for processing
         screenshot_queue.put((filename, temp_path, url))
+        
         with screenshot_lock:
             screenshot_urls[url] = {"filename": filename, "resolved": False}
+        
         return {"pending": True, "filename": filename}
     except Exception as e:
-        logging.error(f"Error taking screenshot for {url}: {e}")
+        logging.error(f"Error taking screenshot for {url}: {str(e)}")
+        # Log trace for debugging
+        import traceback
+        logging.error(traceback.format_exc())
         return None
     finally:
         try:
@@ -214,26 +283,63 @@ def process_screenshot_queue():
             file_size = os.path.getsize(temp_path)
             logging.info(f"Uploading screenshot {filename} ({file_size} bytes)")
             
-            with open(temp_path, "rb") as file:
-                file_content = file.read()
-                # Try to upload with upsert to avoid duplicates
-                supabase.storage.from_(BUCKET_NAME).upload(
-                    path=filename,
-                    file=file_content,
-                    file_options={"contentType": "image/png"},
-                    upsert=True
-                )
+            # Try direct upload first (to diagnose any issues)
+            try:
+                with open(temp_path, "rb") as file:
+                    file_content = file.read()
+                    response = supabase.storage.from_(BUCKET_NAME).upload(
+                        path=filename,
+                        file=file_content,
+                        file_options={"contentType": "image/png"},
+                        upsert=True
+                    )
+                    logging.info(f"Upload response: {response}")
+            except Exception as upload_error:
+                logging.error(f"First upload attempt failed: {str(upload_error)}")
+            
+            # Try a different upload method as fallback
+            try:
+                # Make sure bucket exists
+                buckets = supabase.storage.list_buckets()
+                logging.info(f"Available buckets: {buckets}")
                 
-                # Get the public URL
+                # Try to ensure bucket exists
+                try:
+                    supabase.storage.create_bucket(BUCKET_NAME, {'public': True})
+                    logging.info(f"Created bucket: {BUCKET_NAME}")
+                except:
+                    logging.info(f"Bucket {BUCKET_NAME} likely already exists")
+                
+                # Upload with file path directly
+                with open(temp_path, "rb") as file:
+                    file_content = file.read()
+                    supabase.storage.from_(BUCKET_NAME).upload(
+                        path=filename,
+                        file=file_content,
+                        file_options={"contentType": "image/png"},
+                        upsert=True
+                    )
+            except Exception as second_error:
+                logging.error(f"Second upload attempt failed: {str(second_error)}")
+                continue  # Skip to next file
+                
+            # Get the public URL
+            try:
                 url_public = supabase.storage.from_(BUCKET_NAME).get_public_url(filename)
                 logging.info(f"Screenshot uploaded: {url_public}")
                 
                 with screenshot_lock:
                     screenshot_urls[url] = {"url": url_public, "resolved": True}
                 file_paths.append(temp_path)
+            except Exception as url_error:
+                logging.error(f"Failed to get public URL: {str(url_error)}")
+                
         except Exception as e:
-            logging.error(f"Upload failed for {filename}: {e}")
+            logging.error(f"Upload process failed for {filename}: {str(e)}")
             logging.error(f"Error details: {str(e)}")
+            # Log trace for debugging
+            import traceback
+            logging.error(traceback.format_exc())
     
     # Clean up temporary files
     for path in file_paths:
