@@ -164,7 +164,13 @@ def scrape_detail_page(url):
         name = contact[0].text.strip() if len(contact) > 0 else 'N/A'
         phone = contact[1].text.strip() if len(contact) > 1 else 'N/A'
         desc = get('div#item_text_value')
-        shot = take_screenshot(url, name)
+        
+        # Check if phone doesn't contain any digits
+        has_digits = any(char.isdigit() for char in phone)
+        
+        # Only take screenshot if phone doesn't contain digits
+        shot = take_screenshot(url, name) if not has_digits else 'N/A'
+        
         return {
             'url': url, 'title': title, 'date': date, 'city': city,
             'main_image': main, 'thumbnail_images': thumbs,
